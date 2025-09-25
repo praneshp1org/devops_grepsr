@@ -1,0 +1,334 @@
+# Default values for proxy-monitor
+# This is a YAML-formatted file for production deployment
+
+global:
+  # Global image registry
+  imageRegistry: ""
+  # Global image pull secrets
+  imagePullSecrets: []
+  # Global storage class
+  storageClass: ""
+
+# Namespace configuration
+namespace:
+  create: true
+  name: "proxy-monitoring"
+  annotations: {}
+  labels:
+    istio-injection: enabled
+
+# Prometheus configuration
+prometheus:
+  enabled: true
+  image:
+    registry: quay.io
+    repository: prometheus/prometheus
+    tag: v2.45.0
+  
+  # Resource configuration for production workloads
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "2Gi" 
+    limits:
+      cpu: "2"
+      memory: "8Gi"
+      
+  # Storage configuration
+  storage:
+    size: "100Gi"
+    storageClass: "fast-ssd"
+    
+  # Retention and scraping configuration
+  config:
+    retention: "30d"
+    scrapeInterval: "15s"
+    evaluationInterval: "15s"
+    
+  # External labels for federation
+  externalLabels:
+    cluster: "production"
+    region: "us-east-1"
+    
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    fsGroup: 65534
+    
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 9090
+    
+  # Ingress for external access
+  ingress:
+    enabled: false
+    className: "nginx"
+    annotations: {}
+    hosts:
+      - host: prometheus.monitoring.company.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+# Grafana configuration  
+grafana:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: grafana/grafana
+    tag: 10.1.0
+    
+  # Admin credentials
+  admin:
+    username: admin
+    password: "P@ssw0rd123!"  # Change in production
+    
+  # Resource configuration
+  resources:
+    requests:
+      cpu: "200m" 
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+      
+  # Persistence configuration
+  persistence:
+    enabled: true
+    size: "20Gi"
+    storageClass: "standard"
+    
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 472
+    fsGroup: 472
+    
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 3000
+    
+  # Dashboard provisioning
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+          
+  # Data sources configuration
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus:9090
+        access: proxy
+        isDefault: true
+
+# Istio service mesh configuration
+istio:
+  enabled: true
+  
+  # Istio gateway configuration
+  gateway:
+    enabled: true
+    name: "proxy-monitoring-gateway"
+    hosts:
+      - "monitoring.company.com"
+      
+  # Virtual service configuration
+  virtualService:
+    enabled: true
+    gateways:
+      - proxy-monitoring-gateway
+    http:
+      - match:
+          - uri:
+              prefix: /grafana
+        route:
+          - destination:
+              host: grafana
+              port:
+                number: 3000
+      - match:
+          - uri:
+              prefix: /prometheus  
+        route:
+          - destination:
+              host: prometheus
+              port:
+                number: 9090
+
+# Load generator configuration
+loadGenerator:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: proxy-load-generator
+    tag: "1.0.0"
+    pullPolicy: Always
+    
+  # Number of load generator replicas
+  replicaCount: 3
+  
+  # Resource configuration  
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m" 
+      memory: "512Mi"
+      
+  # Traffic generation configuration
+  config:
+    # Requests per second per replica
+    requestsPerSecond: 100
+    # Target proxy vendors
+    vendors:
+      - vendor-a
+      - vendor-b  
+      - vendor-c
+    # Target destinations for synthetic traffic
+    destinations:
+      - "https://httpbin.org"
+      - "https://jsonplaceholder.typicode.com"
+      - "https://api.github.com"
+      
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+# Monitoring rules and alerts
+monitoring:
+  # ServiceMonitor for Prometheus operator
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    
+  # Prometheus rules for alerting
+  prometheusRules:
+    enabled: true
+    rules:
+      - alert: ProxyHighErrorRate
+        expr: rate(proxy_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High proxy error rate detected"
+          description: "Proxy error rate is above 10% for {{ $labels.vendor }}"
+          
+      - alert: ProxyHighLatency
+        expr: histogram_quantile(0.95, proxy_request_duration_seconds) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High proxy latency detected"
+          description: "95th percentile latency is above 10s for {{ $labels.vendor }}"
+          
+      - alert: ProxyBandwidthHigh
+        expr: rate(proxy_bandwidth_bytes_total[5m]) > 100000000  # 100MB/s
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High bandwidth usage detected"
+          description: "Bandwidth usage is above 100MB/s for {{ $labels.vendor }}"
+
+# RBAC configuration
+rbac:
+  enabled: true
+  
+  # Service account configuration
+  serviceAccount:
+    create: true
+    name: "proxy-monitor"
+    annotations: {}
+    
+  # Cluster role permissions
+  clusterRole:
+    rules:
+      - apiGroups: [""]
+        resources: ["nodes", "nodes/metrics", "services", "endpoints", "pods"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["extensions"]
+        resources: ["ingresses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["networking.k8s.io"]
+        resources: ["ingresses"]
+        verbs: ["get", "list", "watch"]
+
+# Network policies for security
+networkPolicy:
+  enabled: true
+  
+  # Ingress rules
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: istio-system
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: proxy-monitoring
+              
+  # Egress rules  
+  egress:
+    - to: []  # Allow all egress for monitoring
+      
+# Pod disruption budgets
+podDisruptionBudget:
+  prometheus:
+    enabled: true
+    minAvailable: 1
+  grafana:
+    enabled: true  
+    minAvailable: 1
+  loadGenerator:
+    enabled: true
+    minAvailable: 2
+
+# Horizontal pod autoscaler
+autoscaling:
+  loadGenerator:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+# Node affinity and tolerations
+nodeAffinity:
+  # Prefer monitoring workloads on dedicated nodes
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+        - key: node-type
+          operator: In
+          values:
+          - monitoring
+
+tolerations:
+  - key: "monitoring"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"

@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxy-monitoring
+  labels:
+    name: proxy-monitoring
+    istio-injection: enabled
+    monitoring: "true"
+  annotations:
+    description: "Namespace for proxy monitoring infrastructure"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-monitoring-network-policy
+  namespace: proxy-monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from Istio system namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+  # Allow traffic within the monitoring namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: proxy-monitoring
+  # Allow traffic from kube-system for metrics collection
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  # Allow ingress controller access
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000  # Grafana
+    - protocol: TCP
+      port: 9090  # Prometheus
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow HTTPS to external proxy vendors
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow HTTP to external services
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 80
+  # Allow Kubernetes API access
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: default
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow traffic within monitoring namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: proxy-monitoring

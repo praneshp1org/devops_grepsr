@@ -1,0 +1,258 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: proxy-monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'production-cluster'
+        region: 'us-east-1'
+
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+
+    scrape_configs:
+    # Self-monitoring
+    - job_name: 'prometheus'
+      static_configs:
+      - targets: ['localhost:9090']
+      scrape_interval: 15s
+      metrics_path: /metrics
+
+    # Kubernetes API Server
+    - job_name: 'kubernetes-apiservers'
+      kubernetes_sd_configs:
+      - role: endpoints
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+
+    # Kubernetes Nodes
+    - job_name: 'kubernetes-nodes'
+      kubernetes_sd_configs:
+      - role: node
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        insecure_skip_verify: true
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+
+    # Kubernetes Pods
+    - job_name: 'kubernetes-pods'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - proxy-monitoring
+          - istio-system
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+        action: replace
+        target_label: __scheme__
+        regex: (https?)
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+    # Istio Envoy Proxies - Critical for proxy monitoring
+    - job_name: 'istio-mesh'
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - proxy-monitoring
+          - istio-system
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: .*-envoy-prom;http-monitoring
+      - source_labels: [__address__, __meta_kubernetes_endpoint_port_number]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:15090
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: source_namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: source_service
+      metric_relabel_configs:
+      # Keep only relevant Istio metrics to manage cardinality
+      - source_labels: [__name__]
+        action: keep
+        regex: 'istio_requests_total|istio_request_duration_milliseconds.*|istio_request_bytes.*|istio_response_bytes.*|istio_tcp_opened_total|istio_tcp_closed_total'
+      # Add proxy vendor attribution from custom headers
+      - source_labels: [request_protocol]
+        action: replace
+        target_label: protocol_version
+      - source_labels: [source_app]
+        action: keep
+        regex: 'crawler|load-generator'
+
+    # Load Generator Metrics
+    - job_name: 'load-generator'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - proxy-monitoring
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: load-generator
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:8080
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+    # Grafana Metrics
+    - job_name: 'grafana'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - proxy-monitoring
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: grafana
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:3000
+        target_label: __address__
+      - source_labels: [__metrics_path__]
+        action: replace
+        target_label: __metrics_path__
+        replacement: /metrics
+
+    # External Service Discovery for Proxy Vendor Health Monitoring
+    - job_name: 'proxy-vendor-health'
+      static_configs:
+      - targets:
+        - 'proxy-vendor-a.com:443'
+        - 'proxy-vendor-b.com:443'
+        - 'proxy-vendor-c.com:443'
+        labels:
+          job: 'proxy-vendor-health'
+      scheme: https
+      metrics_path: /health
+      scrape_interval: 30s
+      scrape_timeout: 10s
+
+  recording_rules.yml: |
+    groups:
+    - name: proxy.rules
+      interval: 30s
+      rules:
+      # Request rate by vendor
+      - record: proxy:request_rate_5m
+        expr: sum(rate(istio_requests_total{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, destination_service_name, source_app)
+        
+      # Error rate by vendor  
+      - record: proxy:error_rate_5m
+        expr: |
+          sum(rate(istio_requests_total{source_app=~"crawler|load-generator", response_code=~"5.."}[5m])) by (proxy_vendor, source_app) /
+          sum(rate(istio_requests_total{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app)
+        
+      # P95 latency by vendor
+      - record: proxy:p95_latency_5m
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(istio_request_duration_milliseconds_bucket{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app, le)
+          )
+        
+      # P99 latency by vendor
+      - record: proxy:p99_latency_5m
+        expr: |
+          histogram_quantile(0.99, 
+            sum(rate(istio_request_duration_milliseconds_bucket{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app, le)
+          )
+        
+      # Bandwidth usage by vendor (ingress + egress)
+      - record: proxy:bandwidth_total_rate_5m
+        expr: |
+          sum(rate(istio_request_bytes_sum{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app) +
+          sum(rate(istio_response_bytes_sum{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app)
+        
+      # Request bandwidth by vendor
+      - record: proxy:request_bandwidth_rate_5m
+        expr: sum(rate(istio_request_bytes_sum{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app)
+        
+      # Response bandwidth by vendor  
+      - record: proxy:response_bandwidth_rate_5m
+        expr: sum(rate(istio_response_bytes_sum{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app)
+        
+      # Success rate by vendor
+      - record: proxy:success_rate_5m
+        expr: |
+          sum(rate(istio_requests_total{source_app=~"crawler|load-generator", response_code=~"2.."}[5m])) by (proxy_vendor, source_app) /
+          sum(rate(istio_requests_total{source_app=~"crawler|load-generator"}[5m])) by (proxy_vendor, source_app)
+
+    # Infrastructure monitoring rules
+    - name: infrastructure.rules
+      interval: 30s
+      rules:
+      # Pod CPU usage
+      - record: pod:cpu_usage_rate_5m
+        expr: sum(rate(container_cpu_usage_seconds_total{pod=~"prometheus-.*|grafana-.*|load-generator-.*"}[5m])) by (pod, namespace)
+        
+      # Pod memory usage  
+      - record: pod:memory_usage_bytes
+        expr: sum(container_memory_working_set_bytes{pod=~"prometheus-.*|grafana-.*|load-generator-.*"}) by (pod, namespace)
+        
+      # Pod network I/O
+      - record: pod:network_receive_bytes_rate_5m
+        expr: sum(rate(container_network_receive_bytes_total{pod=~"prometheus-.*|grafana-.*|load-generator-.*"}[5m])) by (pod, namespace)
+        
+      - record: pod:network_transmit_bytes_rate_5m
+        expr: sum(rate(container_network_transmit_bytes_total{pod=~"prometheus-.*|grafana-.*|load-generator-.*"}[5m])) by (pod, namespace)

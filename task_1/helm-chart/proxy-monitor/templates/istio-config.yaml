@@ -1,0 +1,189 @@
+{{- if .Values.istio.enabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: {{ .Values.istio.gateway.name }}
+  namespace: {{ .Values.namespace.name }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+    - {{ . }}
+    {{- end }}
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: monitoring-tls-secret
+    hosts:
+    {{- range .Values.istio.gateway.hosts }}
+    - {{ . }}
+    {{- end }}
+---
+{{- if .Values.istio.virtualService.enabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: monitoring-virtualservice
+  namespace: {{ .Values.namespace.name }}
+spec:
+  hosts:
+  {{- range .Values.istio.gateway.hosts }}
+  - {{ . }}
+  {{- end }}
+  gateways:
+  {{- range .Values.istio.virtualService.gateways }}
+  - {{ . }}
+  {{- end }}
+  http:
+  {{- range .Values.istio.virtualService.http }}
+  - match:
+    {{- range .match }}
+    - uri:
+        {{- toYaml .uri | nindent 10 }}
+    {{- end }}
+    route:
+    {{- range .route }}
+    - destination:
+        host: {{ .destination.host }}
+        port:
+          number: {{ .destination.port.number }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: external-proxy-vendors
+  namespace: {{ .Values.namespace.name }}
+spec:
+  hosts:
+  - proxy-vendor-a.com
+  - proxy-vendor-b.com
+  - proxy-vendor-c.com
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  - number: 80
+    name: http
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: DNS
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: proxy-vendor-destination-rules
+  namespace: {{ .Values.namespace.name }}
+spec:
+  host: "*.proxy-vendor-*.com"
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 10
+        maxRetries: 3
+        consecutiveGatewayErrors: 5
+        interval: 30s
+        baseEjectionTime: 30s
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: {{ .Values.namespace.name }}
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: monitoring-access-policy
+  namespace: {{ .Values.namespace.name }}
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/{{ .Values.namespace.name }}/sa/{{ .Values.rbac.serviceAccount.name }}"]
+  - to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/metrics", "/api/*", "/-/*"]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Sidecar
+metadata:
+  name: proxy-monitoring-sidecar
+  namespace: {{ .Values.namespace.name }}
+spec:
+  workloadSelector:
+    labels:
+      app: crawler
+  ingress:
+  - port:
+      number: 15090
+      name: http-envoy-prom
+      protocol: HTTP
+    defaultEndpoint: 127.0.0.1:15000
+  egress:
+  - hosts:
+    - "./*"
+    - "istio-system/*"
+    - "kube-system/*"
+  - port:
+      number: 443
+      name: https
+    hosts:
+    - "proxy-vendor-a.com"
+    - "proxy-vendor-b.com" 
+    - "proxy-vendor-c.com"
+  - port:
+      number: 80
+      name: http
+    hosts:
+    - "httpbin.org"
+    - "jsonplaceholder.typicode.com"
+    - "api.github.com"
+---
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: proxy-metrics
+  namespace: {{ .Values.namespace.name }}
+spec:
+  metrics:
+  - providers:
+    - name: prometheus
+  - overrides:
+    - match:
+        metric: ALL_METRICS
+      tagOverrides:
+        proxy_vendor:
+          value: |
+            has(request.headers['x-proxy-vendor']) ? request.headers['x-proxy-vendor'] : 'unknown'
+        destination_service_name:
+          value: |
+            destination.service.name | 'unknown'
+        source_app:
+          value: |
+            source.labels['app'] | 'unknown'
+{{- end }}

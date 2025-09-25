@@ -1,0 +1,40 @@
+apiVersion: v2
+name: proxy-monitor
+description: A Helm chart for Kubernetes proxy monitoring solution with Istio, Prometheus, and Grafana
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - monitoring
+  - proxy
+  - prometheus  
+  - grafana
+  - istio
+  - observability
+
+maintainers:
+  - name: DevOps Team
+    email: devops-team@company.com
+
+dependencies:
+  - name: prometheus
+    version: 15.18.0
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: prometheus.enabled
+  - name: grafana  
+    version: 6.48.0
+    repository: https://grafana.github.io/helm-charts
+    condition: grafana.enabled
+  - name: istio-base
+    version: 1.18.0
+    repository: https://istio-release.storage.googleapis.com/charts
+    condition: istio.enabled
+  - name: istiod
+    version: 1.18.0
+    repository: https://istio-release.storage.googleapis.com/charts
+    condition: istio.enabled
+
+annotations:
+  category: Monitoring
+  licenses: MIT

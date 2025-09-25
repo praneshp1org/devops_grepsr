@@ -1,0 +1,235 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-generator-config
+  namespace: proxy-monitoring
+  labels:
+    app: load-generator
+data:
+  traffic-patterns: "steady,burst"
+  config.yaml: |
+    # Load Generator Configuration
+    vendors:
+      vendor-a:
+        base_url: "https://proxy-vendor-a.com"
+        pools:
+          - "datacenter-us-east-1"
+          - "datacenter-us-west-1"
+          - "datacenter-eu-west-1"
+          - "datacenter-ap-south-1"
+        auth_headers:
+          X-API-Key: "vendor-a-production-key"
+          X-Client-ID: "crawler-client-001"
+        rate_limit: 1000
+        timeout: 30
+        retry_count: 3
+        weight: 40  # 40% of traffic
+        
+      vendor-b:
+        base_url: "https://proxy-vendor-b.com" 
+        pools:
+          - "residential-us-mixed"
+          - "residential-eu-premium"
+          - "residential-asia-standard"
+          - "residential-global-pool"
+        auth_headers:
+          Authorization: "Bearer vendor-b-jwt-token-here"
+          X-Service-Tier: "enterprise"
+        rate_limit: 500
+        timeout: 45
+        retry_count: 2
+        weight: 35  # 35% of traffic
+        
+      vendor-c:
+        base_url: "https://proxy-vendor-c.com"
+        pools:
+          - "mobile-us-carriers"
+          - "mobile-eu-networks" 
+          - "mobile-asia-pacific"
+          - "mobile-global-roaming"
+        auth_headers:
+          X-Auth-Token: "vendor-c-mobile-auth-token"
+          X-Network-Type: "4g-5g-mixed"
+        rate_limit: 300
+        timeout: 60
+        retry_count: 1
+        weight: 25  # 25% of traffic
+
+    # Target destinations for synthetic traffic
+    destinations:
+      - url: "https://httpbin.org"
+        paths: ["/get", "/post", "/put", "/delete", "/status/200", "/delay/1", "/json", "/headers"]
+        weight: 30
+      - url: "https://jsonplaceholder.typicode.com"
+        paths: ["/posts", "/users", "/comments", "/albums", "/photos", "/todos"]
+        weight: 25
+      - url: "https://api.github.com"
+        paths: ["/users/octocat", "/repos/microsoft/vscode", "/rate_limit", "/emojis"]
+        weight: 25
+      - url: "https://postman-echo.com"
+        paths: ["/get", "/post", "/status/200", "/delay/1", "/basic-auth", "/cookies"]
+        weight: 20
+
+    # Traffic generation patterns
+    traffic_patterns:
+      # Continuous steady traffic for baseline monitoring
+      steady:
+        requests_per_second: 10
+        duration: 86400  # 24 hours
+        methods: ["GET"]
+        payload_sizes: [0, 100, 200]
+        concurrent_requests: 50
+        ramp_up_duration: 60
+        
+      # Burst traffic to simulate peak loads
+      burst:
+        requests_per_second: 100
+        duration: 300  # 5 minutes
+        methods: ["GET", "POST"]
+        payload_sizes: [100, 500, 1000, 5000]
+        concurrent_requests: 200
+        ramp_up_duration: 30
+        
+      # Spike traffic for stress testing
+      spike:
+        requests_per_second: 300
+        duration: 60  # 1 minute
+        methods: ["GET", "POST", "PUT", "DELETE"]
+        payload_sizes: [50, 100, 500, 1000, 10000, 50000]
+        concurrent_requests: 500
+        ramp_up_duration: 10
+        
+      # Mixed realistic crawler behavior
+      crawler_simulation:
+        requests_per_second: 50
+        duration: 7200  # 2 hours
+        methods: ["GET", "POST"]
+        payload_sizes: [0, 100, 500, 1000]
+        concurrent_requests: 100
+        ramp_up_duration: 120
+        
+      # Low intensity monitoring
+      monitoring:
+        requests_per_second: 2
+        duration: 86400  # 24 hours
+        methods: ["GET"]
+        payload_sizes: [0]
+        concurrent_requests: 10
+        ramp_up_duration: 30
+
+    # Advanced configuration
+    advanced:
+      # Request timing and distribution
+      request_timing:
+        jitter_percentage: 10  # Add 10% random jitter to intervals
+        burst_probability: 0.1  # 10% chance of burst requests
+        pause_probability: 0.05  # 5% chance of random pauses
+        
+      # Failure simulation
+      failure_simulation:
+        network_failure_rate: 0.02  # 2% network failures
+        timeout_rate: 0.01  # 1% timeouts
+        retry_with_backoff: true
+        max_backoff_seconds: 60
+        
+      # Monitoring and logging
+      monitoring:
+        metrics_collection_interval: 15
+        detailed_logging: false
+        log_request_bodies: false
+        log_response_headers: true
+        
+      # Resource limits
+      resource_limits:
+        max_concurrent_requests_per_vendor: 100
+        connection_pool_size: 200
+        dns_cache_ttl: 300
+        keep_alive_timeout: 30
+
+  # Additional vendor-specific configurations
+  vendor-specific-config.yaml: |
+    vendor_configurations:
+      vendor-a:
+        # High-performance datacenter proxies
+        request_headers:
+          X-Datacenter-Tier: "premium"
+          X-Connection-Type: "persistent"
+          X-Bandwidth-Tier: "unlimited"
+        retry_strategy: "exponential_backoff"
+        health_check_endpoint: "/api/v1/health"
+        failover_pools:
+          - "datacenter-us-east-2"
+          - "datacenter-us-central-1"
+          
+      vendor-b:
+        # Residential IP rotation service
+        request_headers:
+          X-Rotation-Mode: "automatic"
+          X-Session-Duration: "300"
+          X-Geo-Targeting: "enabled"
+        retry_strategy: "linear_backoff"  
+        health_check_endpoint: "/health/residential"
+        session_management:
+          sticky_sessions: true
+          session_timeout: 300
+          rotation_interval: 60
+          
+      vendor-c:
+        # Mobile carrier proxy network
+        request_headers:
+          X-Carrier-Type: "mixed"
+          X-Network-Quality: "4g-5g"
+          X-Roaming-Enabled: "true"
+        retry_strategy: "immediate_retry"
+        health_check_endpoint: "/mobile/status"
+        mobile_specific:
+          carrier_rotation: true
+          network_fallback: "3g"
+          roaming_costs_limit: 1000
+
+  # Prometheus metrics configuration
+  metrics-config.yaml: |
+    prometheus_metrics:
+      # Custom metrics definitions
+      custom_metrics:
+        - name: "crawler_requests_by_category"
+          type: "counter"
+          description: "Total requests by category and vendor"
+          labels: ["vendor", "category", "status", "destination"]
+          
+        - name: "crawler_response_time_percentiles"
+          type: "histogram"
+          description: "Response time percentiles by vendor"
+          labels: ["vendor", "method", "destination"]
+          buckets: [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 60.0, 120.0]
+          
+        - name: "crawler_bandwidth_usage"
+          type: "counter"
+          description: "Bandwidth usage by vendor and direction"
+          labels: ["vendor", "direction", "destination"]
+          
+        - name: "crawler_proxy_pool_utilization"
+          type: "gauge"
+          description: "Proxy pool utilization percentage"
+          labels: ["vendor", "pool", "region"]
+          
+        - name: "crawler_error_categories"
+          type: "counter"
+          description: "Error count by category and vendor"
+          labels: ["vendor", "error_type", "error_category"]
+
+      # Metric collection settings
+      collection_settings:
+        scrape_interval: 15
+        scrape_timeout: 10
+        metric_retention: "30d"
+        high_cardinality_limit: 1000000
+        
+      # Alert thresholds
+      alert_thresholds:
+        error_rate_critical: 10.0  # 10% error rate
+        error_rate_warning: 5.0    # 5% error rate
+        latency_p95_critical: 30.0  # 30 second P95 latency
+        latency_p95_warning: 10.0   # 10 second P95 latency
+        bandwidth_critical: 1000000000  # 1GB/s bandwidth
+        bandwidth_warning: 500000000    # 500MB/s bandwidth

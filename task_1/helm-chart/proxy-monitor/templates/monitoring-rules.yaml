@@ -1,0 +1,202 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: proxy-monitoring
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: proxy-monitor
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+  endpoints:
+  - port: http
+    interval: {{ .Values.monitoring.serviceMonitor.interval }}
+    scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+    path: /metrics
+  - port: http-grafana
+    interval: {{ .Values.monitoring.serviceMonitor.interval }}
+    scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor  
+metadata:
+  name: istio-proxy-monitoring
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: istio-proxy
+spec:
+  selector:
+    matchLabels:
+      app: istio-proxy
+  endpoints:
+  - port: http-monitoring
+    interval: {{ .Values.monitoring.serviceMonitor.interval }}
+    scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+    path: /stats/prometheus
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: load-generator-monitoring
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: load-generator
+spec:
+  selector:
+    matchLabels:
+      app: load-generator
+  endpoints:
+  - port: metrics
+    interval: {{ .Values.monitoring.serviceMonitor.interval }}
+    scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+    path: /metrics
+{{- end }}
+---
+{{- if .Values.monitoring.prometheusRules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: proxy-monitoring-rules
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: proxy-monitor
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: proxy.rules
+    interval: 30s
+    rules:
+    # Recording rules for aggregated metrics
+    - record: proxy:request_rate_5m
+      expr: sum(rate(istio_requests_total{source_app="crawler"}[5m])) by (proxy_vendor, destination_service_name)
+    
+    - record: proxy:error_rate_5m
+      expr: sum(rate(istio_requests_total{source_app="crawler", response_code=~"5.."}[5m])) by (proxy_vendor) / sum(rate(istio_requests_total{source_app="crawler"}[5m])) by (proxy_vendor)
+    
+    - record: proxy:p95_latency_5m
+      expr: histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{source_app="crawler"}[5m])) by (proxy_vendor, le))
+    
+    - record: proxy:bandwidth_rate_5m
+      expr: sum(rate(istio_request_bytes_sum{source_app="crawler"}[5m]) + rate(istio_response_bytes_sum{source_app="crawler"}[5m])) by (proxy_vendor)
+
+    # Alerting rules
+    {{- range .Values.monitoring.prometheusRules.rules }}
+    - alert: {{ .alert }}
+      expr: {{ .expr }}
+      {{- if .for }}
+      for: {{ .for }}
+      {{- end }}
+      labels:
+        severity: {{ .labels.severity }}
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: {{ .annotations.summary | quote }}
+        description: {{ .annotations.description | quote }}
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#{{ .alert | lower }}"
+    {{- end }}
+    
+    # Additional infrastructure alerts
+    - alert: ProxyMonitoringDown
+      expr: up{job="prometheus"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: "Proxy monitoring Prometheus is down"
+        description: "Prometheus has been down for more than 5 minutes"
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#prometheus-down"
+    
+    - alert: GrafanaDown
+      expr: up{job="grafana"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: "Grafana is down"
+        description: "Grafana has been down for more than 5 minutes"
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#grafana-down"
+    
+    - alert: HighMemoryUsage
+      expr: (container_memory_working_set_bytes{pod=~"prometheus-.*|grafana-.*"} / container_spec_memory_limit_bytes) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: "High memory usage in monitoring pods"
+        description: "Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of its memory limit"
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#high-memory-usage"
+    
+    - alert: DiskSpaceRunningOut
+      expr: (node_filesystem_avail_bytes{mountpoint="/prometheus"} / node_filesystem_size_bytes{mountpoint="/prometheus"}) < 0.1
+      for: 15m
+      labels:
+        severity: critical
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: "Prometheus disk space running low"
+        description: "Prometheus storage disk has less than 10% space remaining"
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#disk-space-low"
+        
+    - alert: ProxyVendorUnreachable
+      expr: proxy:request_rate_5m == 0
+      for: 10m
+      labels:
+        severity: critical
+        team: devops
+        service: proxy-monitoring
+      annotations:
+        summary: "Proxy vendor {{ $labels.proxy_vendor }} is unreachable"
+        description: "No requests have been successful to {{ $labels.proxy_vendor }} for 10 minutes"
+        runbook_url: "https://wiki.company.com/runbooks/proxy-monitoring#vendor-unreachable"
+{{- end }}
+---
+{{- if .Values.podDisruptionBudget.prometheus.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: prometheus-pdb
+  namespace: {{ .Values.namespace.name }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.prometheus.minAvailable }}
+  selector:
+    matchLabels:
+      app: prometheus
+{{- end }}
+---
+{{- if .Values.podDisruptionBudget.grafana.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: grafana-pdb
+  namespace: {{ .Values.namespace.name }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.grafana.minAvailable }}
+  selector:
+    matchLabels:
+      app: grafana
+{{- end }}
+---
+{{- if .Values.podDisruptionBudget.loadGenerator.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: load-generator-pdb
+  namespace: {{ .Values.namespace.name }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.loadGenerator.minAvailable }}
+  selector:
+    matchLabels:
+      app: load-generator
+{{- end }}

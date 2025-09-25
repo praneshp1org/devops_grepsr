@@ -1,0 +1,338 @@
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: proxy-monitoring-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - monitoring.company.com
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: monitoring-tls-secret
+    hosts:
+    - monitoring.company.com
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: monitoring-virtualservice
+  namespace: proxy-monitoring
+spec:
+  hosts:
+  - monitoring.company.com
+  gateways:
+  - istio-system/proxy-monitoring-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /grafana
+    rewrite:
+      uri: /
+    route:
+    - destination:
+        host: grafana.proxy-monitoring.svc.cluster.local
+        port:
+          number: 3000
+    timeout: 60s
+  - match:
+    - uri:
+        prefix: /prometheus
+    rewrite:
+      uri: /
+    route:
+    - destination:
+        host: prometheus.proxy-monitoring.svc.cluster.local
+        port:
+          number: 9090
+    timeout: 60s
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: grafana.proxy-monitoring.svc.cluster.local
+        port:
+          number: 3000
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: external-proxy-vendors
+  namespace: proxy-monitoring
+spec:
+  hosts:
+  - proxy-vendor-a.com
+  - api.proxy-vendor-a.com
+  - proxy-vendor-b.com
+  - api.proxy-vendor-b.com
+  - proxy-vendor-c.com
+  - api.proxy-vendor-c.com
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  - number: 80
+    name: http
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: DNS
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: external-test-targets
+  namespace: proxy-monitoring
+spec:
+  hosts:
+  - httpbin.org
+  - jsonplaceholder.typicode.com
+  - api.github.com
+  - postman-echo.com
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  - number: 80
+    name: http
+    protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: DNS
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: proxy-vendor-destination-rules
+  namespace: proxy-monitoring
+spec:
+  host: "*.proxy-vendor-*.com"
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 30s
+        tcpKeepalive:
+          time: 7200s
+          interval: 75s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 10
+        maxRetries: 3
+        consecutiveGatewayErrors: 5
+        interval: 30s
+        baseEjectionTime: 30s
+        maxEjectionPercent: 50
+        h2UpgradePolicy: UPGRADE
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: test-targets-destination-rules
+  namespace: proxy-monitoring
+spec:
+  host: "*.org"
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+    connectionPool:
+      tcp:
+        maxConnections: 50
+        connectTimeout: 10s
+      http:
+        http1MaxPendingRequests: 25
+        http2MaxRequests: 50
+        maxRequestsPerConnection: 5
+        maxRetries: 2
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: proxy-monitoring
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: monitoring-access-policy
+  namespace: proxy-monitoring
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/proxy-monitoring/sa/proxy-monitor"]
+        namespaces: ["proxy-monitoring", "istio-system"]
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/metrics", "/api/*", "/-/*", "/graph", "/targets"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: grafana-access-policy
+  namespace: proxy-monitoring
+spec:
+  selector:
+    matchLabels:
+      app: grafana
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/proxy-monitoring/sa/proxy-monitor"]
+        namespaces: ["proxy-monitoring", "istio-system"]
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/*", "/public/*", "/metrics", "/login", "/logout"]
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Sidecar
+metadata:
+  name: proxy-monitoring-sidecar
+  namespace: proxy-monitoring
+spec:
+  workloadSelector:
+    labels:
+      app: load-generator
+  ingress:
+  - port:
+      number: 15090
+      name: http-envoy-prom
+      protocol: HTTP
+    defaultEndpoint: 127.0.0.1:15000
+  - port:
+      number: 8080
+      name: http-metrics
+      protocol: HTTP
+    defaultEndpoint: 127.0.0.1:8080
+  egress:
+  - hosts:
+    - "./*"
+    - "istio-system/*"
+    - "kube-system/*"
+  - port:
+      number: 443
+    hosts:
+    - "proxy-vendor-a.com"
+    - "api.proxy-vendor-a.com"
+    - "proxy-vendor-b.com" 
+    - "api.proxy-vendor-b.com"
+    - "proxy-vendor-c.com"
+    - "api.proxy-vendor-c.com"
+  - port:
+      number: 80
+    hosts:
+    - "httpbin.org"
+    - "jsonplaceholder.typicode.com"
+    - "postman-echo.com"
+  - port:
+      number: 443
+    hosts:
+    - "api.github.com"
+---
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: proxy-metrics
+  namespace: proxy-monitoring
+spec:
+  metrics:
+  - providers:
+    - name: prometheus
+  - overrides:
+    - match:
+        metric: ALL_METRICS
+        mode: CLIENT
+      tagOverrides:
+        # Extract proxy vendor from custom header
+        proxy_vendor:
+          value: |
+            has(request.headers['x-proxy-vendor']) ? request.headers['x-proxy-vendor'] : (
+              has(request.headers['user-agent']) && (request.headers['user-agent'] | contains('vendor-a')) ? 'vendor-a' :
+              has(request.headers['user-agent']) && (request.headers['user-agent'] | contains('vendor-b')) ? 'vendor-b' :
+              has(request.headers['user-agent']) && (request.headers['user-agent'] | contains('vendor-c')) ? 'vendor-c' :
+              'unknown'
+            )
+        # Extract destination information
+        destination_service_name:
+          value: destination.service.name | 'external'
+        destination_host:
+          value: request.headers['host'] | destination.service.name | 'unknown'
+        # Source application identification
+        source_app:
+          value: source.labels['app'] | 'unknown'
+        # Protocol version detection
+        protocol_version:
+          value: request.protocol | 'unknown'
+        # Request size category
+        request_size_category:
+          value: |
+            request.total_size < 1024 ? 'small' :
+            request.total_size < 10240 ? 'medium' :
+            request.total_size < 102400 ? 'large' : 'xlarge'
+---
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: control-plane
+  namespace: istio-system
+spec:
+  components:
+    pilot:
+      k8s:
+        env:
+        - name: PILOT_ENABLE_WORKLOAD_ENTRY_AUTOREGISTRATION
+          value: "true"
+        - name: PILOT_ENABLE_CROSS_CLUSTER_WORKLOAD_ENTRY
+          value: "true"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2048Mi
+          limits:
+            cpu: 1000m
+            memory: 4096Mi
+  meshConfig:
+    defaultConfig:
+      # Enable Envoy access logs for debugging
+      proxyStatsMatcher:
+        inclusionRegexps:
+        - ".*circuit_breakers.*"
+        - ".*upstream_rq_retry.*"
+        - ".*upstream_rq_pending.*"
+        - ".*_cx_.*"
+        exclusionRegexps:
+        - ".*osconfig.*"
+      # Proxy resource configuration
+      concurrency: 2
+      proxyMetadata:
+        PILOT_ENABLE_WORKLOAD_ENTRY_AUTOREGISTRATION: "true"
+    extensionProviders:
+    - name: prometheus
+      prometheus:
+        configOverride:
+          metric_relabeling_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: 'istio_requests_total|istio_request_duration_milliseconds.*|istio_request_bytes.*|istio_response_bytes.*'

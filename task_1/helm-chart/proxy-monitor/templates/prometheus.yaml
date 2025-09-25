@@ -1,0 +1,256 @@
+{{- if .Values.prometheus.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: prometheus
+    version: {{ .Values.prometheus.image.tag }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        version: {{ .Values.prometheus.image.tag }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ .Values.rbac.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.prometheus.securityContext | nindent 8 }}
+      containers:
+      - name: prometheus
+        image: {{ .Values.prometheus.image.registry }}/{{ .Values.prometheus.image.repository }}:{{ .Values.prometheus.image.tag }}
+        ports:
+        - containerPort: 9090
+          name: http
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time={{ .Values.prometheus.config.retention }}'
+          - '--web.enable-lifecycle'
+          - '--web.route-prefix=/'
+        {{- if .Values.prometheus.externalLabels }}
+          {{- range $key, $value := .Values.prometheus.externalLabels }}
+          - '--web.external-url=http://prometheus.{{ $.Values.namespace.name }}.svc.cluster.local:9090'
+          {{- end }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.prometheus.resources | nindent 10 }}
+        volumeMounts:
+        - name: prometheus-config-volume
+          mountPath: /etc/prometheus/
+        - name: prometheus-storage-volume
+          mountPath: /prometheus/
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+      volumes:
+      - name: prometheus-config-volume
+        configMap:
+          defaultMode: 420
+          name: prometheus-config
+      - name: prometheus-storage-volume
+        persistentVolumeClaim:
+          claimName: prometheus-pvc
+      {{- with .Values.nodeAffinity }}
+      affinity:
+        nodeAffinity:
+          {{- toYaml . | nindent 10 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    app: prometheus
+spec:
+  type: {{ .Values.prometheus.service.type }}
+  ports:
+  - port: {{ .Values.prometheus.service.port }}
+    targetPort: 9090
+    protocol: TCP
+    name: http
+  selector:
+    app: prometheus
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: {{ .Values.namespace.name }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.prometheus.storage.size }}
+  {{- if .Values.prometheus.storage.storageClass }}
+  storageClassName: {{ .Values.prometheus.storage.storageClass }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: {{ .Values.namespace.name }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.prometheus.config.scrapeInterval }}
+      evaluation_interval: {{ .Values.prometheus.config.evaluationInterval }}
+      {{- if .Values.prometheus.externalLabels }}
+      external_labels:
+        {{- toYaml .Values.prometheus.externalLabels | nindent 8 }}
+      {{- end }}
+
+    rule_files:
+      - "prometheus_rules.yml"
+
+    scrape_configs:
+    # Prometheus itself
+    - job_name: 'prometheus'
+      static_configs:
+      - targets: ['localhost:9090']
+
+    # Kubernetes API server
+    - job_name: 'kubernetes-apiservers'
+      kubernetes_sd_configs:
+      - role: endpoints
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+    # Kubernetes nodes
+    - job_name: 'kubernetes-nodes'
+      kubernetes_sd_configs:
+      - role: node
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+
+    # Kubernetes pods
+    - job_name: 'kubernetes-pods'
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+    # Istio Envoy sidecars for proxy metrics
+    - job_name: 'istio-proxy'
+      kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+          - {{ .Values.namespace.name }}
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: .*-proxy;http-monitoring
+      - source_labels: [__address__, __meta_kubernetes_endpoint_port_number]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:15090
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        action: keep
+        regex: 'istio_requests_total|istio_request_duration_milliseconds.*|istio_tcp_opened_total|istio_tcp_closed_total'
+
+    # Load generator metrics
+    - job_name: 'load-generator'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+          - {{ .Values.namespace.name }}
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: load-generator
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:8080
+        target_label: __address__
+
+  prometheus_rules.yml: |
+    groups:
+    - name: proxy.rules
+      rules:
+      {{- if .Values.monitoring.prometheusRules.enabled }}
+      {{- range .Values.monitoring.prometheusRules.rules }}
+      - alert: {{ .alert }}
+        expr: {{ .expr }}
+        {{- if .for }}
+        for: {{ .for }}
+        {{- end }}
+        labels:
+          {{- toYaml .labels | nindent 10 }}
+        annotations:
+          {{- toYaml .annotations | nindent 10 }}
+      {{- end }}
+      {{- end }}
+{{- end }}
