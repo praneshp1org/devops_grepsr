@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: microservices
+data:
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  DB_NAME: "microservices_db"
+  DB_USER: "postgres"
+  NODE_ENV: "production"
+  PORT: "3000"

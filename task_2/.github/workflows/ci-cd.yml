@@ -1,0 +1,186 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test Services
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'api-service/package-lock.json'
+        
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Test API Service
+      run: |
+        cd api-service
+        npm ci
+        npm test
+        
+    - name: Test Worker Service
+      run: |
+        cd worker-service
+        pip install -r requirements.txt
+        python -m pytest test_worker.py -v
+        
+    - name: Test Frontend Service
+      run: |
+        cd frontend-service
+        npm ci
+        npm test -- --coverage --watchAll=false
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    strategy:
+      matrix:
+        service: [api-service, worker-service, frontend-service]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./${{ matrix.service }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+        
+    - name: Set up Kubernetes config
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+        
+    - name: Deploy to Kubernetes
+      run: |
+        # Update image tags in deployments
+        export IMAGE_TAG="${{ github.sha }}"
+        
+        # Apply namespace and configs first
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/configmap.yaml
+        kubectl apply -f k8s/secret.yaml
+        kubectl apply -f k8s/db-init-configmap.yaml
+        kubectl apply -f k8s/postgres-pvc.yaml
+        
+        # Deploy database first
+        kubectl apply -f k8s/postgres-deployment.yaml
+        kubectl rollout status deployment/postgres-deployment -n microservices --timeout=300s
+        
+        # Deploy services with new image tags
+        sed -i "s|api-service:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-service:main-${{ github.sha }}|g" k8s/api-deployment.yaml
+        sed -i "s|worker-service:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker-service:main-${{ github.sha }}|g" k8s/worker-deployment.yaml
+        sed -i "s|frontend-service:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend-service:main-${{ github.sha }}|g" k8s/frontend-deployment.yaml
+        
+        kubectl apply -f k8s/api-deployment.yaml
+        kubectl apply -f k8s/worker-deployment.yaml
+        kubectl apply -f k8s/frontend-deployment.yaml
+        
+        # Wait for deployments to complete
+        kubectl rollout status deployment/api-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/worker-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/frontend-deployment -n microservices --timeout=300s
+        
+    - name: Verify deployment
+      run: |
+        kubectl get pods -n microservices
+        kubectl get services -n microservices
+
+  rollback:
+    runs-on: ubuntu-latest
+    if: failure() && github.ref == 'refs/heads/main'
+    needs: deploy
+    environment: production
+    
+    steps:
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+        
+    - name: Set up Kubernetes config
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+        
+    - name: Rollback deployments
+      run: |
+        echo "Rolling back failed deployment..."
+        kubectl rollout undo deployment/api-deployment -n microservices
+        kubectl rollout undo deployment/worker-deployment -n microservices
+        kubectl rollout undo deployment/frontend-deployment -n microservices
+        
+        # Wait for rollback to complete
+        kubectl rollout status deployment/api-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/worker-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/frontend-deployment -n microservices --timeout=300s
+        
+    - name: Notify rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: "🚨 Deployment failed and rolled back to previous version"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

@@ -1,0 +1,57 @@
+name: Manual Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment:
+        description: 'Deployment to rollback'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - api-deployment
+        - worker-deployment
+        - frontend-deployment
+      revisions:
+        description: 'Number of revisions to rollback (default: 1)'
+        required: false
+        default: '1'
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+        
+    - name: Set up Kubernetes config
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+        
+    - name: Perform rollback
+      run: |
+        DEPLOYMENT="${{ github.event.inputs.deployment }}"
+        REVISIONS="${{ github.event.inputs.revisions }}"
+        
+        if [ "$DEPLOYMENT" = "all" ]; then
+          echo "Rolling back all deployments..."
+          kubectl rollout undo deployment/api-deployment -n microservices --to-revision=$(($(kubectl rollout history deployment/api-deployment -n microservices | wc -l) - REVISIONS))
+          kubectl rollout undo deployment/worker-deployment -n microservices --to-revision=$(($(kubectl rollout history deployment/worker-deployment -n microservices | wc -l) - REVISIONS))
+          kubectl rollout undo deployment/frontend-deployment -n microservices --to-revision=$(($(kubectl rollout history deployment/frontend-deployment -n microservices | wc -l) - REVISIONS))
+        else
+          echo "Rolling back $DEPLOYMENT..."
+          kubectl rollout undo deployment/$DEPLOYMENT -n microservices --to-revision=$(($(kubectl rollout history deployment/$DEPLOYMENT -n microservices | wc -l) - REVISIONS))
+        fi
+        
+    - name: Verify rollback
+      run: |
+        kubectl get pods -n microservices
+        kubectl rollout status deployment/api-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/worker-deployment -n microservices --timeout=300s
+        kubectl rollout status deployment/frontend-deployment -n microservices --timeout=300s

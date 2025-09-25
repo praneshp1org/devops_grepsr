@@ -1,0 +1,28 @@
+-- Initialize database schema
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id SERIAL PRIMARY KEY,
+    type VARCHAR(50) NOT NULL,
+    payload JSONB,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+);
+
+-- Insert sample data
+INSERT INTO users (name, email) VALUES 
+    ('John Doe', 'john@example.com'),
+    ('Jane Smith', 'jane@example.com'),
+    ('Bob Johnson', 'bob@example.com')
+ON CONFLICT (email) DO NOTHING;
+
+INSERT INTO jobs (type, payload, status) VALUES 
+    ('email', '{"to": "john@example.com", "subject": "Welcome"}', 'pending'),
+    ('report', '{"user_id": 1, "type": "monthly"}', 'pending')
+ON CONFLICT DO NOTHING;
